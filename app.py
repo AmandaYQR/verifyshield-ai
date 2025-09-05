@@ -12,10 +12,78 @@ GC_KEY      = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
 STRIPE_KEY  = st.secrets.get("STRIPE_SECRET_KEY", "")
 NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # For possible future use
 
-stripe.api_key = STRIPE_KEY
-st.set_page_config(page_title="VerifyShield AI", layout="wide")
+# ==================== Firebase Auth (Email/Password) ====================
+FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")
 
-# ==================== Language Selector ====================
+# REST endpoints
+_FB_SIGNUP = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={FIREBASE_API_KEY}"
+_FB_SIGNIN = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}"
+
+def _fb_signup(email: str, password: str) -> dict:
+    """Create account in Firebase Auth."""
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    try:
+        r = requests.post(_FB_SIGNUP, json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        return {"error": {"message": str(e)}}
+
+def _fb_signin(email: str, password: str) -> dict:
+    """Login to Firebase Auth."""
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    try:
+        r = requests.post(_FB_SIGNIN, json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        return {"error": {"message": str(e)}}stripe.api_key = STRIPE_KEY
+st.set_page_config(page_title="VerifyShield AI", layout="wide")
+# ==================== Auth Gate (login/signup) ====================
+if "user" not in st.session_state:
+    st.session_state.user = None  # will store Firebase response dict on login
+
+def _render_auth():
+    st.title("🔐 Sign in to VerifyShield AI")
+
+    tab_login, tab_signup = st.tabs(["Login", "Sign up"])
+
+    with tab_login:
+        lemail = st.text_input("Email", key="login_email")
+        lpass  = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login", type="primary", key="login_btn"):
+            if not FIREBASE_API_KEY:
+                st.error("Missing FIREBASE_API_KEY in Streamlit secrets.")
+            else:
+                res = _fb_signin(lemail, lpass)
+                if "idToken" in res:
+                    # keep the minimum we need
+                    st.session_state.user = {
+                        "email": res.get("email", lemail),
+                        "idToken": res.get("idToken"),
+                        "refreshToken": res.get("refreshToken"),
+                        "localId": res.get("localId"),
+                    }
+                    st.success(f"Welcome {st.session_state.user['email']} 👋")
+                    st.rerun()
+                else:
+                    st.error(res.get("error", {}).get("message", "Login failed"))
+
+    with tab_signup:
+        semail = st.text_input("Email", key="signup_email")
+        spass  = st.text_input("Password (6+ chars)", type="password", key="signup_pass")
+        if st.button("Create account", key="signup_btn"):
+            if not FIREBASE_API_KEY:
+                st.error("Missing FIREBASE_API_KEY in Streamlit secrets.")
+            else:
+                res = _fb_signup(semail, spass)
+                if "idToken" in res:
+                    st.success("Account created. Please go to the Login tab to sign in.")
+                else:
+                    st.error(res.get("error", {}).get("message", "Signup failed"))
+
+# If not logged in, show auth and stop rendering the rest of the app.
+if not st.session_state.user:
+    _render_auth()
+    st.stop()# ==================== Language Selector ====================
 st.sidebar.markdown("🌐 **Language**")
 LANGUAGE_OPTIONS = {
     "English": "en",
@@ -36,6 +104,13 @@ LANGUAGE_OPTIONS = {
 selected_lang_name = st.sidebar.selectbox("Choose language", list(LANGUAGE_OPTIONS.keys()))
 TARGET_LANG = LANGUAGE_OPTIONS[selected_lang_name]
 
+# Sidebar account info / logout
+with st.sidebar:
+    st.markdown(f"**Signed in:** {st.session_state.user.get('email', '')}")
+    if st.button("Log out"):
+        st.session_state.user = None
+        st.rerun()
+        
 def t(text: str) -> str:
     """Translate text into selected target language. Return original on error or English."""
     try:
