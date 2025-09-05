@@ -3,16 +3,16 @@ import requests
 import hashlib
 import stripe
 import random
+from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
 # ==================== Config / Secrets ====================
 VT_KEY      = st.secrets.get("VIRUSTOTAL_API_KEY", "")
 GC_KEY      = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
 STRIPE_KEY  = st.secrets.get("STRIPE_SECRET_KEY", "")
-NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # Used to surface mainstream coverage
+NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # For possible future use
 
 stripe.api_key = STRIPE_KEY
-
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
 
 # ==================== Language Selector ====================
@@ -53,54 +53,45 @@ def track_event(event_name: str) -> None:
     except Exception:
         pass
 
-def google_fact_check(query: str):
-    """Query Google Fact Check Tools for a claim."""
-    if not GC_KEY:
-        return {"claims": None, "error": "missing_key"}
-    try:
-        url = (
-            "https://factchecktools.googleapis.com/v1alpha1/claims:search"
-            f"?query={requests.utils.quote(query)}&key={GC_KEY}"
-        )
-        return requests.get(url, timeout=20).json()
-    except Exception as e:
-        return {"claims": None, "error": str(e)}
+def _clean_html_to_text(html: str):
+    """Extract title and body text from raw HTML using BeautifulSoup."""
+    soup = BeautifulSoup(html, "lxml")
+    title = soup.title.string if soup.title else ""
+    # Grab readable text blocks
+    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+    text = "\n".join(paragraphs)
+    return title, text
 
-def fetch_mainstream_articles(query: str):
-    """
-    Use NewsAPI to retrieve mainstream coverage that matches the claim.
-    Returns ([(title, url, source)], error | None | 'missing_key').
-    """
-    if not NEWSAPI_KEY:
-        return [], "missing_key"
-    try:
-        url = (
-            "https://newsapi.org/v2/everything?"
-            f"q={requests.utils.quote(query)}&language=en&sortBy=relevancy&pageSize=5&apiKey={NEWSAPI_KEY}"
-        )
-        res = requests.get(url, timeout=20).json()
-        if res.get("status") == "ok":
-            items = []
-            for a in res.get("articles", []):
-                title = a.get("title") or "Article"
-                url_  = a.get("url") or ""
-                source = a.get("source", {}).get("name", "")
-                if url_:
-                    items.append((title, url_, source))
-            return items, None
-        return [], res.get("message") or "newsapi_error"
-    except Exception as e:
-        return [], str(e)
+def summarize_text(title: str, text: str, max_sentences: int = 5):
+    """Simple extractive summarizer (top N sentences)."""
+    sentences = text.split(".")
+    sentences = [s.strip() for s in sentences if len(s.split()) > 5]
+    summary = sentences[:max_sentences]
+    return f"**{title}**\n\n" + "\n- " + "\n- ".join(summary)
 
-def heuristic_flags(text: str):
-    """Very simple rule-based suspicion signals."""
-    text_lower = text.lower()
-    flags = []
-    if any(w in text_lower for w in ["miracle", "secret", "cure", "shocking", "exposed", "one weird trick"]):
-        flags.append("Clickbait/sensational phrasing detected.")
-    if any(w in text_lower for w in ["yesterday", "today"]) and any(w in text_lower for w in ["retire", "death", "break up"]):
-        flags.append("Time-sensitive, extraordinary claim without context.")
-    return flags
+def summarize_from_url(url: str):
+    """Fetch article from URL, clean, summarize, and translate into chosen language."""
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return None, f"Error: HTTP {r.status_code}"
+
+        title, text = _clean_html_to_text(r.text)
+        if not text.strip():
+            return None, "No text extracted from this page."
+
+        summary = summarize_text(title, text)
+
+        # Translate final summary into chosen language if needed
+        if TARGET_LANG != "en":
+            try:
+                summary = GoogleTranslator(source="auto", target=TARGET_LANG).translate(summary)
+            except Exception:
+                pass
+
+        return summary, None
+    except Exception as e:
+        return None, str(e)
 
 # ==================== Sidebar Nav ====================
 if "user_id" not in st.session_state:
@@ -111,10 +102,10 @@ if "user_id" not in st.session_state:
 st.sidebar.title(t("Navigation"))
 nav_labels = {
     "Home": t("Home"),
-    "News/Article Checker": t("News/Article Checker"),
+    "News Summarizer": t("News Summarizer"),
     "About": t("About"),
 }
-page = st.sidebar.radio(t("Go to"), [nav_labels["Home"], nav_labels["News/Article Checker"], nav_labels["About"]], key="nav_top")
+page = st.sidebar.radio(t("Go to"), [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["About"]], key="nav_top")
 
 # ==================== HOME (Email/Link/Virus) ====================
 if page == nav_labels["Home"]:
@@ -154,10 +145,9 @@ if page == nav_labels["Home"]:
                 except Exception as e:
                     explanation = f"VirusTotal error: {e}"
 
-            # Email -> simple heuristics + optional link scan
+            # Email -> simple heuristics
             elif content_type == "Email Text":
                 text_lower = user_input.lower()
-                links = [w for w in user_input.split() if w.startswith(("http://", "https://"))]
                 suspicious_keywords = [
                     "password", "bank", "urgent", "verify", "gift card",
                     "account locked", "click here", "confirm immediately",
@@ -168,34 +158,12 @@ if page == nav_labels["Home"]:
                 else:
                     explanation = "No obvious phishing keywords found."
 
-                if links and VT_KEY:
-                    try:
-                        vt_url = (
-                            "https://www.virustotal.com/vtapi/v2/url/report"
-                            f"?apikey={VT_KEY}&resource={links[0]}"
-                        )
-                        response = requests.get(vt_url, timeout=20).json()
-                        if response.get("positives", 0) > 0:
-                            verdict = "Fake"
-                            virus_verdict = "Malicious"
-                            explanation += f" Suspicious link flagged by {response.get('positives')} engines."
-                        else:
-                            explanation += " Email link appears safe."
-                    except Exception as e:
-                        explanation += f" Link scan error: {e}"
-
             # Output
             if verdict == "Fake" or virus_verdict == "Malicious":
                 st.error(t(f"Verdict: {verdict}. Virus Check: {virus_verdict}. {explanation}"))
             else:
                 st.success(t(f"Verdict: {verdict}. Virus Check: {virus_verdict}. {explanation}"))
 
-            # Streak
-            if "streak" not in st.session_state:
-                st.session_state.streak = 0
-            st.session_state.streak += 1
-            st.info(t(f"Streak: {st.session_state.streak} verifications!"))
-            track_event("verification_completed")
         else:
             st.warning(t("Please paste some content first."))
 
@@ -208,91 +176,25 @@ if page == nav_labels["Home"]:
         "Tip: News with no sources? Likely fake – verify with us!",
     ]
     st.write(t(random.choice(tips)))
-    if st.button(t("Complete Daily Challenge"), key="daily_btn"):
-        st.success(t("Well done! Learned something new."))
-        track_event("daily_challenge_completed")
 
-# ==================== NEWS / ARTICLE CHECKER (AI Chatbox) ====================
-elif page == nav_labels["News/Article Checker"]:
-    st.title(t("📰 AI Chatbox for News Verification"))
-    st.subheader(t("Checking news/article (real/fake)"))
-    st.caption(t("Ask about a headline or claim. I’ll check fact-checks, flag suspicious wording/domains, and show credible sources."))
+# ==================== NEWS SUMMARIZER ====================
+elif page == nav_labels["News Summarizer"]:
+    st.title(t("📰 AI Chatbox for News Summarization"))
+    st.subheader(t("Paste a news article link, and I'll give you a professional TL;DR summary."))
 
-    # Input box directly under heading
-    claim_text = st.text_area(t("👉 Type or paste a headline/claim here:"), key="claim_box")
+    url_input = st.text_input(t("Paste a news URL"), key="news_url")
 
-    if st.button(t("🔍 Check now"), key="check_news_btn"):
-        if not claim_text.strip():
-            st.warning(t("Please enter a headline first."))
+    if st.button(t("Summarize"), key="summarize_btn"):
+        if not url_input.strip():
+            st.warning(t("Please enter a URL first."))
         else:
-            track_event("news_check_submit")
-
-            # 1) Heuristics
-            flags = heuristic_flags(claim_text)
-
-            # 2) Google Fact Check
-            fc = google_fact_check(claim_text)
-            claims = fc.get("claims")
-            fc_error = fc.get("error")
-
-            # 3) Surface mainstream coverage
-            articles, news_err = fetch_mainstream_articles(claim_text)
-
-            # Decide verdict
-            has_fc_false = False
-            if claims:
-                # If any review labels it false/misleading, mark fake
-                for c in claims:
-                    rating = (c.get("claimReview", [{}])[0].get("textualRating") or "").lower()
-                    if rating in {"false", "misleading"}:
-                        has_fc_false = True
-                        break
-
-            if has_fc_false:
-                verdict = "Fake"
-            elif flags and not articles:
-                verdict = "Suspicious"
-            else:
-                verdict = "Unclear"
-
-            # Present results
-            if verdict == "Fake":
-                st.error(t("Verdict: Fake"))
-            elif verdict == "Suspicious":
-                st.warning(t("Verdict: Suspicious"))
-            else:
-                st.info(t("Verdict: Unclear"))
-
-            if flags:
-                st.write(t("Heuristic flags:"))
-                st.markdown("\n".join([f"- {t(f)}" for f in flags]))
-
-            if fc_error and fc_error != "missing_key":
-                st.info(t(f"Fact-check look-up issue: {fc_error}"))
-            elif fc_error == "missing_key":
-                st.info(t("Tip: Add GOOGLE_FACT_CHECK_API_KEY in your Streamlit Secrets for deeper checks."))
-
-            if claims:
-                st.write(t("Fact-check references found:"))
-                for c in claims[:3]:
-                    review = c.get("claimReview", [{}])[0]
-                    site = review.get("publisher", {}).get("name", "Fact-checker")
-                    rating = review.get("textualRating", "Rating N/A")
-                    url = review.get("url", "")
-                    if url:
-                        st.markdown(f"- **{t(site)}** — {t(rating)} · [{t('Read review')}]({url})")
-                    else:
-                        st.markdown(f"- **{t(site)}** — {t(rating)}")
-
-            if articles:
-                st.write(t("Credible coverage from mainstream news:"))
-                for title, url, source in articles:
-                    st.markdown(f"- [{t(title)}]({url}) — _{t(source)}_")
-            else:
-                if news_err == "missing_key":
-                    st.info(t("Tip: Add NEWSAPI_KEY in Streamlit Secrets to surface mainstream links."))
-                elif news_err:
-                    st.info(t(f"Could not fetch mainstream sources (reason: {news_err})."))
+            with st.spinner(t("Fetching and summarizing...")):
+                summary, err = summarize_from_url(url_input.strip())
+                if err:
+                    st.error(t(f"Error: {err}"))
+                else:
+                    st.success(summary)
+                    st.markdown(f"**Source:** {url_input}")
 
 # ==================== ABOUT ====================
 elif page == nav_labels["About"]:
@@ -301,12 +203,13 @@ elif page == nav_labels["About"]:
     st.write(t(
         "In 2025, fake emails, phishing links, and misinformation flood inboxes and feeds. "
         "VerifyShield AI helps users detect if content is real or fake, while teaching identification "
-        "skills through daily engagement. From spotting scam emails to verifying news, we're your daily authenticity guardian."
+        "skills through daily engagement. From spotting scam emails to summarizing news, we're your daily authenticity guardian."
     ))
     st.markdown("## " + t("Key Features"))
     st.markdown(t(
         "- **Verification Scans:** Submit emails/links/news; get 'real or fake' verdicts.\n"
         "- **Virus Detection:** Check links/platforms for malware.\n"
+        "- **News Summarizer:** Paste a link and get a professional TL;DR.\n"
         "- **Daily Courses:** Engaging lessons/quizzes to teach spotting fakes/viruses.\n"
         "- **Gamification:** Streaks, badges, and challenges for daily habits.\n"
         "- **Freemium Model:** Free basics, premium for unlimited."
@@ -318,4 +221,3 @@ elif page == nav_labels["About"]:
 # ==================== Footer ====================
 st.markdown("---")
 st.write(t("Share verifications on X! #VerifyShieldAI | © 2025 VerifyShield AI"))
-
