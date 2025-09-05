@@ -1,49 +1,21 @@
 import streamlit as st
 import requests
 import hashlib
+import stripe
 import random
-import time
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
 # ==================== Config / Secrets ====================
-VT_KEY          = st.secrets.get("VIRUSTOTAL_API_KEY", "")
-GC_KEY          = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
-STRIPE_KEY      = st.secrets.get("STRIPE_SECRET_KEY", "")
-FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")
-FIREBASE_DB_URL  = st.secrets.get("FIREBASE_DB_URL", "")
+VT_KEY      = st.secrets.get("VIRUSTOTAL_API_KEY", "")
+GC_KEY      = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
+STRIPE_KEY  = st.secrets.get("STRIPE_SECRET_KEY", "")
+NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # reserved for future use
+FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")# ✅ IMPORTANT: keep this on its own line (do NOT chain with a return)
+FIREBASE_DB_URL = st.secrets.get("FIREBASE_DB_URL", "")
 
+stripe.api_key = STRIPE_KEY
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
-
-# ==================== Language Selector ====================
-st.sidebar.markdown("🌐 **Language**")
-LANGUAGE_OPTIONS = {
-    "English": "en",
-    "Spanish": "es",
-    "French": "fr",
-    "German": "de",
-    "Chinese (Simplified)": "zh-CN",
-    "Chinese (Traditional)": "zh-TW",
-    "Japanese": "ja",
-    "Korean": "ko",
-    "Malay": "ms",
-    "Arabic": "ar",
-    "Hindi": "hi",
-    "Russian": "ru",
-    "Portuguese": "pt",
-    "Italian": "it",
-}
-selected_lang_name = st.sidebar.selectbox("Choose language", list(LANGUAGE_OPTIONS.keys()))
-TARGET_LANG = LANGUAGE_OPTIONS[selected_lang_name]
-
-def t(text: str) -> str:
-    """Translate text into selected target language. Return original on error or English."""
-    try:
-        if not text or TARGET_LANG == "en":
-            return text
-        return GoogleTranslator(source="auto", target=TARGET_LANG).translate(text)
-    except Exception:
-        return text
 
 # ==================== Firebase Email/Password Auth (REST) ====================
 def fb_signup(email: str, password: str):
@@ -71,8 +43,9 @@ def fb_signin(email: str, password: str):
         return r, None
     except Exception as e:
         return None, str(e)
+import time
+from datetime import datetime
 
-# ==================== Firebase RTDB Helpers ====================
 def db_save_summary(uid: str, id_token: str, url: str, title: str, summary: str):
     """
     Save one summary under /users/{uid}/summaries in RTDB.
@@ -118,38 +91,85 @@ def db_list_summaries(uid: str, id_token: str, limit: int = 50):
         items.sort(key=lambda x: x["ts"], reverse=True)
         return items[:limit]
     except Exception:
-        return []
+        return []# ==================== Firebase Realtime Database (Summaries History) ====================
+import time
+from datetime import datetime
 
-# ==================== Helpers (common) ====================
+def db_save_summary(uid: str, id_token: str, url: str, title: str, summary: str):
+    ...
+
+def db_list_summaries(uid: str, id_token: str, limit: int = 50):
+    ...
+    
+
+# ==================== Helpers ====================
 def track_event(event_name: str) -> None:
+    ...# ==================== Helpers ====================
+def track_event(event_name: str) -> None:
+    ...# ==================== Language Selector ====================
+st.sidebar.markdown("🌐 **Language**")
+LANGUAGE_OPTIONS = {
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "German": "de",
+    "Chinese (Simplified)": "zh-CN",
+    "Chinese (Traditional)": "zh-TW",
+    "Japanese": "ja",
+    "Korean": "ko",
+    "Malay": "ms",
+    "Arabic": "ar",
+    "Hindi": "hi",
+    "Russian": "ru",
+    "Portuguese": "pt",
+    "Italian": "it",
+}
+selected_lang_name = st.sidebar.selectbox("Choose language", list(LANGUAGE_OPTIONS.keys()))
+TARGET_LANG = LANGUAGE_OPTIONS[selected_lang_name]
+
+
+def t(text: str) -> str:
+    """Translate text into selected target language. Returns original if target is English or on error."""
+    try:
+        if not text or TARGET_LANG == "en":
+            return text
+        return GoogleTranslator(source="auto", target=TARGET_LANG).translate(text)
+    except Exception:
+        return text
+
+
+# ==================== Helpers ====================
+def track_event(event_name: str) -> None:
+    """Lightweight analytics file (best-effort)."""
     try:
         with open("analytics.log", "a") as f:
             f.write(f"{event_name},User:{st.session_state.get('user_id','-')}\n")
     except Exception:
         pass
 
-def _clean_html_to_text(html: str):
-    """Extract title and body text from raw HTML using BeautifulSoup, with parser fallback."""
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
 
-    title = soup.title.string if soup.title else ""
+def _clean_html_to_text(html: str):
+    """Extract title and body text from raw HTML using BeautifulSoup."""
+    soup = BeautifulSoup(html, "lxml")
+    title = soup.title.string.strip() if soup.title and soup.title.string else ""
+    # Grab readable text blocks
     paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-    text = "\n".join(paragraphs)
+    text = "\n".join(p for p in paragraphs if p)
     return title, text
 
-def summarize_text(title: str, text: str, max_sentences: int = 5):
-    """Simple extractive summarizer (top N sentences)."""
-    sentences = text.replace("\n", " ").split(".")
-    sentences = [s.strip() for s in sentences if len(s.split()) > 5]
-    summary = sentences[:max_sentences]
-    bullet = "- " + "\n- ".join(summary) if summary else t("No key sentences detected.")
-    return f"**{title or t('Untitled')}**\n\n{bullet}"
+
+def summarize_text(title: str, text: str, max_sentences: int = 5) -> str:
+    """Very simple extractive summary: take the first N non-trivial sentences."""
+    raw = text.replace("\n", " ")
+    # naive sentence split
+    sentences = [s.strip() for s in raw.split(".") if len(s.split()) > 5]
+    bullets = sentences[:max_sentences]
+    body = "\n- " + "\n- ".join(bullets) if bullets else "\n- (Not enough content to summarize.)"
+    return f"**{title or 'Summary'}**{body}"
+
 
 def summarize_from_url(url: str):
-    """Fetch article from URL, clean, summarize, and translate into chosen language."""
+    """Fetch article from URL, clean, summarize, and translate if needed."""
     try:
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
@@ -168,10 +188,30 @@ def summarize_from_url(url: str):
             except Exception:
                 pass
 
-        return (title or "Untitled"), summary, None
+        return summary, None
     except Exception as e:
-        return None, None, str(e)
+        return None, str(e)
 
+
+# ==================== Session seed ====================
+if "user_id" not in st.session_state:
+    st.session_state.user_id = hashlib.sha256(
+        str(st.session_state.get("session_id", "guest")).encode()
+    ).hexdigest()[:8]
+
+
+# ==================== Sidebar Nav ====================
+st.sidebar.title(t("Navigation"))
+nav_labels = {
+    "Home": t("Home"),
+    "News Summarizer": t("News Summarizer"),
+    "About": t("About"),
+}
+page = st.sidebar.radio(
+    t("Go to"),
+    [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["About"]],
+    key="nav_top",
+)
 # ==================== Sidebar Account Box ====================
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -217,26 +257,6 @@ with st.sidebar.expander("👤 Account", expanded=True):
                         st.error(f"Sign up failed: {err}")
                     else:
                         st.success("Account created! You can sign in now.")
-
-# ==================== Sidebar Nav ====================
-if "user_id" not in st.session_state:
-    st.session_state.user_id = hashlib.sha256(
-        str(st.session_state.get("session_id", "guest")).encode()
-    ).hexdigest()[:8]
-
-st.sidebar.title(t("Navigation"))
-nav_labels = {
-    "Home": t("Home"),
-    "News Summarizer": t("News Summarizer"),
-    "History": t("History"),
-    "About": t("About"),
-}
-page = st.sidebar.radio(
-    t("Go to"),
-    [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["History"], nav_labels["About"]],
-    key="nav_top"
-)
-
 # ==================== HOME (Email/Link/Virus) ====================
 if page == nav_labels["Home"]:
     st.title(t("VerifyShield AI - Detect Real or Fake Content"))
@@ -248,10 +268,10 @@ if page == nav_labels["Home"]:
         ["Email Text", "Link/URL", "Platform/Link for Virus"],
         key="type_sel",
     )
-    user_input = st.text_area(t("Paste here:"), key="user_text")
+    user_input = st.text_area(t("Paste here:"), key="user_text", height=150)
 
     if st.button(t("Verify Now"), key="verify_btn"):
-        if user_input:
+        if user_input.strip():
             verdict = "Real"
             virus_verdict = "Safe"
             explanation = ""
@@ -260,10 +280,10 @@ if page == nav_labels["Home"]:
             if content_type in ["Link/URL", "Platform/Link for Virus"]:
                 try:
                     if not VT_KEY:
-                        raise RuntimeError("Missing VirusTotal key")
+                        raise RuntimeError("Missing VirusTotal key (add VIRUSTOTAL_API_KEY to Secrets)")
                     vt_url = (
                         "https://www.virustotal.com/vtapi/v2/url/report"
-                        f"?apikey={VT_KEY}&resource={user_input}"
+                        f"?apikey={VT_KEY}&resource={user_input.strip()}"
                     )
                     response = requests.get(vt_url, timeout=20).json()
                     if response.get("positives", 0) > 0:
@@ -275,7 +295,7 @@ if page == nav_labels["Home"]:
                 except Exception as e:
                     explanation = f"VirusTotal error: {e}"
 
-            # Email -> simple heuristics
+            # Email -> simple heuristics (no external calls)
             elif content_type == "Email Text":
                 text_lower = user_input.lower()
                 suspicious_keywords = [
@@ -306,65 +326,26 @@ if page == nav_labels["Home"]:
     ]
     st.write(t(random.choice(tips)))
 
+
 # ==================== NEWS SUMMARIZER ====================
 elif page == nav_labels["News Summarizer"]:
     st.title(t("📰 AI Chatbox for News Summarization"))
     st.subheader(t("Paste a news article link, and I'll give you a professional TL;DR summary."))
 
-    url_input = st.text_input(t("Paste a news URL"), key="news_url")
+    url_input = st.text_input(t("Paste a news URL"), key="news_url", placeholder="https://example.com/article")
 
     if st.button(t("Summarize"), key="summarize_btn"):
         if not url_input.strip():
             st.warning(t("Please enter a URL first."))
         else:
             with st.spinner(t("Fetching and summarizing...")):
-                title, summary, err = summarize_from_url(url_input.strip())
+                summary, err = summarize_from_url(url_input.strip())
                 if err:
                     st.error(t(f"Error: {err}"))
                 else:
                     st.success(summary)
                     st.markdown(f"**{t('Source')}:** {url_input}")
 
-                    # Save to history if signed in
-                    u = st.session_state.user
-                    if u and u.get("idToken") and u.get("localId"):
-                        ok, db_err = db_save_summary(
-                            uid=u["localId"],
-                            id_token=u["idToken"],
-                            url=url_input.strip(),
-                            title=title or "Untitled",
-                            summary=summary,
-                        )
-                        if ok:
-                            st.info(t("Saved to your history. See the History tab."))
-                        else:
-                            st.info(t(f"Saved locally but failed to store in cloud: {db_err}"))
-                    else:
-                        st.info(t("Sign in to save this summary to your History."))
-
-# ==================== HISTORY (for signed-in users) ====================
-elif page == nav_labels["History"]:
-    st.title(t("📚 Your History"))
-    u = st.session_state.user
-    if not u:
-        st.warning(t("Please sign in (left sidebar) to view your saved summaries."))
-    else:
-        items = db_list_summaries(u.get("localId", ""), u.get("idToken", ""))
-        if not items:
-            st.info(t("No history yet. Generate a summary in the News Summarizer tab."))
-        else:
-            labels = [
-                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(it['ts']))} — {it['title']}"
-                for it in items
-            ]
-            choice = st.selectbox(t("Select a past summary"), options=labels, index=0)
-            idx = labels.index(choice) if choice in labels else 0
-            chosen = items[idx]
-            st.markdown(f"**{t('Title')}:** {chosen['title']}")
-            if chosen["url"]:
-                st.markdown(f"**{t('Source')}:** {chosen['url']}")
-            st.markdown("---")
-            st.markdown(chosen["summary"])
 
 # ==================== ABOUT ====================
 elif page == nav_labels["About"]:
@@ -380,13 +361,14 @@ elif page == nav_labels["About"]:
         "- **Verification Scans:** Submit emails/links/news; get 'real or fake' verdicts.\n"
         "- **Virus Detection:** Check links/platforms for malware.\n"
         "- **News Summarizer:** Paste a link and get a professional TL;DR.\n"
-        "- **History:** Signed-in users can revisit saved summaries.\n"
         "- **Daily Courses:** Engaging lessons/quizzes to teach spotting fakes/viruses.\n"
+        "- **Gamification:** Streaks, badges, and challenges for daily habits.\n"
         "- **Freemium Model:** Free basics, premium for unlimited."
     ))
     st.markdown("## " + t("Contact Us"))
     st.write(t("Email: support@verifyshield.ai"))
     st.write(t("Follow on X: @VerifyShieldAI"))
+
 
 # ==================== Footer ====================
 st.markdown("---")
