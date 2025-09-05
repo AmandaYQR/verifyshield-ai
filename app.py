@@ -1,21 +1,17 @@
 import streamlit as st
 import requests
 import hashlib
-import stripe
 import random
 import time
-from datetime import datetime
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
-# ==================== Secrets / Config ====================
-VT_KEY             = st.secrets.get("VIRUSTOTAL_API_KEY", "")
-GC_KEY             = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
-STRIPE_KEY         = st.secrets.get("STRIPE_SECRET_KEY", "")
-NEWSAPI_KEY        = st.secrets.get("NEWSAPI_KEY", "")          # optional (not used in this file)
-FIREBASE_API_KEY   = st.secrets.get("FIREBASE_API_KEY", "")     # REQUIRED for login
-FIREBASE_DB_URL    = st.secrets.get("FIREBASE_DB_URL", "")      # REQUIRED for history
-stripe.api_key = STRIPE_KEY
+# ==================== Config / Secrets ====================
+VT_KEY          = st.secrets.get("VIRUSTOTAL_API_KEY", "")
+GC_KEY          = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
+STRIPE_KEY      = st.secrets.get("STRIPE_SECRET_KEY", "")
+FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")
+FIREBASE_DB_URL  = st.secrets.get("FIREBASE_DB_URL", "")
 
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
 
@@ -37,7 +33,7 @@ LANGUAGE_OPTIONS = {
     "Portuguese": "pt",
     "Italian": "it",
 }
-selected_lang_name = st.sidebar.selectbox("Choose language", list(LANGUAGE_OPTIONS.keys()), key="lang_sel")
+selected_lang_name = st.sidebar.selectbox("Choose language", list(LANGUAGE_OPTIONS.keys()))
 TARGET_LANG = LANGUAGE_OPTIONS[selected_lang_name]
 
 def t(text: str) -> str:
@@ -49,56 +45,7 @@ def t(text: str) -> str:
     except Exception:
         return text
 
-# ==================== Helpers ====================
-def track_event(event_name: str) -> None:
-    try:
-        with open("analytics.log", "a") as f:
-            f.write(f"{event_name},User:{st.session_state.get('user_id','-')}\n")
-    except Exception:
-        pass
-
-def _clean_html_to_text(html: str):
-    """Extract title and body text from raw HTML using BeautifulSoup."""
-    soup = BeautifulSoup(html, "lxml")
-    title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled"
-    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-    text = "\n".join(p for p in paragraphs if p)
-    return title, text
-
-def summarize_text(title: str, text: str, max_sentences: int = 5):
-    """Very simple extractive summary: first N reasonably-long sentences."""
-    # Split on period and keep sentences > 6 words
-    raw = [s.strip() for s in text.replace("! ", ". ").replace("? ", ". ").split(".")]
-    sentences = [s for s in raw if len(s.split()) > 6]
-    summary_lines = sentences[:max_sentences] if sentences else [text[:220] + ("..." if len(text) > 220 else "")]
-    body = "\n- " + "\n- ".join(summary_lines)
-    return f"**{title}**\n{body}"
-
-def summarize_from_url(url: str):
-    """Fetch article from URL, clean, summarize, and translate into chosen language."""
-    try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
-            return None, None, f"Error: HTTP {r.status_code}"
-
-        title, text = _clean_html_to_text(r.text)
-        if not text.strip():
-            return None, None, "No readable text extracted from this page."
-
-        summary = summarize_text(title, text)
-
-        # Translate final summary if needed
-        if TARGET_LANG != "en":
-            try:
-                summary = GoogleTranslator(source="auto", target=TARGET_LANG).translate(summary)
-            except Exception:
-                pass
-
-        return title, summary, None
-    except Exception as e:
-        return None, None, str(e)
-
-# ==================== Firebase Auth (Email/Password via REST) ====================
+# ==================== Firebase Email/Password Auth (REST) ====================
 def fb_signup(email: str, password: str):
     if not FIREBASE_API_KEY:
         return None, "Missing FIREBASE_API_KEY in Streamlit Secrets."
@@ -125,7 +72,7 @@ def fb_signin(email: str, password: str):
     except Exception as e:
         return None, str(e)
 
-# ==================== Firebase DB (per-user history) ====================
+# ==================== Firebase RTDB Helpers ====================
 def db_save_summary(uid: str, id_token: str, url: str, title: str, summary: str):
     """
     Save one summary under /users/{uid}/summaries in RTDB.
@@ -135,7 +82,7 @@ def db_save_summary(uid: str, id_token: str, url: str, title: str, summary: str)
     try:
         payload = {
             "url": url,
-            "title": (title or "Untitled")[:160],
+            "title": title[:160] if title else "Untitled",
             "summary": summary,
             "ts": int(time.time())
         }
@@ -173,35 +120,81 @@ def db_list_summaries(uid: str, id_token: str, limit: int = 50):
     except Exception:
         return []
 
-# ==================== Session init ====================
-if "user_id" not in st.session_state:
-    st.session_state.user_id = hashlib.sha256(
-        str(st.session_state.get("session_id", "guest")).encode()
-    ).hexdigest()[:8]
+# ==================== Helpers (common) ====================
+def track_event(event_name: str) -> None:
+    try:
+        with open("analytics.log", "a") as f:
+            f.write(f"{event_name},User:{st.session_state.get('user_id','-')}\n")
+    except Exception:
+        pass
 
+def _clean_html_to_text(html: str):
+    """Extract title and body text from raw HTML using BeautifulSoup, with parser fallback."""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    title = soup.title.string if soup.title else ""
+    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+    text = "\n".join(paragraphs)
+    return title, text
+
+def summarize_text(title: str, text: str, max_sentences: int = 5):
+    """Simple extractive summarizer (top N sentences)."""
+    sentences = text.replace("\n", " ").split(".")
+    sentences = [s.strip() for s in sentences if len(s.split()) > 5]
+    summary = sentences[:max_sentences]
+    bullet = "- " + "\n- ".join(summary) if summary else t("No key sentences detected.")
+    return f"**{title or t('Untitled')}**\n\n{bullet}"
+
+def summarize_from_url(url: str):
+    """Fetch article from URL, clean, summarize, and translate into chosen language."""
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return None, f"Error: HTTP {r.status_code}"
+
+        title, text = _clean_html_to_text(r.text)
+        if not text.strip():
+            return None, "No text extracted from this page."
+
+        summary = summarize_text(title, text)
+
+        # Translate final summary into chosen language if needed
+        if TARGET_LANG != "en":
+            try:
+                summary = GoogleTranslator(source="auto", target=TARGET_LANG).translate(summary)
+            except Exception:
+                pass
+
+        return (title or "Untitled"), summary, None
+    except Exception as e:
+        return None, None, str(e)
+
+# ==================== Sidebar Account Box ====================
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# ==================== Sidebar Account Box ====================
 with st.sidebar.expander("👤 Account", expanded=True):
     if st.session_state.user:
-        st.markdown(f"**{t('Signed in')}:** {st.session_state.user.get('email', '')}")
-        if st.button(t("Log out"), use_container_width=True, key="logout_btn"):
+        st.markdown(f"**Signed in:** {st.session_state.user.get('email', '')}")
+        if st.button("Log out", use_container_width=True):
             st.session_state.user = None
             st.rerun()
     else:
-        tab_login, tab_signup = st.tabs([t("Sign in"), t("Sign up")])
+        tab_login, tab_signup = st.tabs(["Sign in", "Sign up"])
 
         with tab_login:
-            li_email = st.text_input(t("Email"), key="li_email")
-            li_pass = st.text_input(t("Password"), type="password", key="li_pass")
-            if st.button(t("Sign in"), key="li_btn", use_container_width=True):
+            li_email = st.text_input("Email", key="li_email")
+            li_pass = st.text_input("Password", type="password", key="li_pass")
+            if st.button("Sign in", key="li_btn", use_container_width=True):
                 if not li_email or not li_pass:
-                    st.warning(t("Please enter email and password."))
+                    st.warning("Please enter email and password.")
                 else:
                     data, err = fb_signin(li_email, li_pass)
                     if err:
-                        st.error(t(f"Sign in failed: {err}"))
+                        st.error(f"Sign in failed: {err}")
                     else:
                         st.session_state.user = {
                             "email": data.get("email", li_email),
@@ -209,23 +202,28 @@ with st.sidebar.expander("👤 Account", expanded=True):
                             "refreshToken": data.get("refreshToken", ""),
                             "localId": data.get("localId", ""),
                         }
-                        st.success(t("Signed in!"))
+                        st.success("Signed in!")
                         st.rerun()
 
         with tab_signup:
-            su_email = st.text_input(t("Email"), key="su_email")
-            su_pass = st.text_input(t("Password (min 6 chars)"), type="password", key="su_pass")
-            if st.button(t("Create account"), key="su_btn", use_container_width=True):
+            su_email = st.text_input("Email", key="su_email")
+            su_pass = st.text_input("Password (min 6 chars)", type="password", key="su_pass")
+            if st.button("Create account", key="su_btn", use_container_width=True):
                 if not su_email or not su_pass:
-                    st.warning(t("Please enter email and password."))
+                    st.warning("Please enter email and password.")
                 else:
                     data, err = fb_signup(su_email, su_pass)
                     if err:
-                        st.error(t(f"Sign up failed: {err}"))
+                        st.error(f"Sign up failed: {err}")
                     else:
-                        st.success(t("Account created! You can sign in now."))
+                        st.success("Account created! You can sign in now.")
 
-# ==================== Navigation ====================
+# ==================== Sidebar Nav ====================
+if "user_id" not in st.session_state:
+    st.session_state.user_id = hashlib.sha256(
+        str(st.session_state.get("session_id", "guest")).encode()
+    ).hexdigest()[:8]
+
 st.sidebar.title(t("Navigation"))
 nav_labels = {
     "Home": t("Home"),
@@ -233,7 +231,11 @@ nav_labels = {
     "History": t("History"),
     "About": t("About"),
 }
-page = st.sidebar.radio(t("Go to"), [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["History"], nav_labels["About"]], key="nav_top")
+page = st.sidebar.radio(
+    t("Go to"),
+    [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["History"], nav_labels["About"]],
+    key="nav_top"
+)
 
 # ==================== HOME (Email/Link/Virus) ====================
 if page == nav_labels["Home"]:
@@ -323,41 +325,46 @@ elif page == nav_labels["News Summarizer"]:
                     st.success(summary)
                     st.markdown(f"**{t('Source')}:** {url_input}")
 
-                    # Save to user history if signed in
-                    if st.session_state.user:
-                        ok, save_err = db_save_summary(
-                            uid=st.session_state.user["localId"],
-                            id_token=st.session_state.user["idToken"],
+                    # Save to history if signed in
+                    u = st.session_state.user
+                    if u and u.get("idToken") and u.get("localId"):
+                        ok, db_err = db_save_summary(
+                            uid=u["localId"],
+                            id_token=u["idToken"],
                             url=url_input.strip(),
-                            title=title or "News Summary",
-                            summary=summary
+                            title=title or "Untitled",
+                            summary=summary,
                         )
                         if ok:
-                            st.info(t("✅ Saved to your history"))
+                            st.info(t("Saved to your history. See the History tab."))
                         else:
-                            st.warning(t(f"⚠️ Not saved: {save_err}"))
+                            st.info(t(f"Saved locally but failed to store in cloud: {db_err}"))
                     else:
-                        st.caption(t("Sign in to save this to your history."))
+                        st.info(t("Sign in to save this summary to your History."))
 
-# ==================== HISTORY ====================
-elif page == nav_labels["History"]]:
-    st.title(t("📜 Your History"))
-    if not st.session_state.user:
-        st.warning(t("Please sign in to view your history."))
+# ==================== HISTORY (for signed-in users) ====================
+elif page == nav_labels["History"]:
+    st.title(t("📚 Your History"))
+    u = st.session_state.user
+    if not u:
+        st.warning(t("Please sign in (left sidebar) to view your saved summaries."))
     else:
-        items = db_list_summaries(
-            st.session_state.user["localId"],
-            st.session_state.user["idToken"]
-        )
+        items = db_list_summaries(u.get("localId", ""), u.get("idToken", ""))
         if not items:
-            st.info(t("No history yet. Summarize an article to add your first item."))
+            st.info(t("No history yet. Generate a summary in the News Summarizer tab."))
         else:
-            for it in items:
-                ts_str = datetime.fromtimestamp(it["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-                st.markdown(f"### [{t(it['title'])}]({it['url']})")
-                st.write(it["summary"])
-                st.caption(f"🕒 {ts_str}")
-                st.divider()
+            labels = [
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(it['ts']))} — {it['title']}"
+                for it in items
+            ]
+            choice = st.selectbox(t("Select a past summary"), options=labels, index=0)
+            idx = labels.index(choice) if choice in labels else 0
+            chosen = items[idx]
+            st.markdown(f"**{t('Title')}:** {chosen['title']}")
+            if chosen["url"]:
+                st.markdown(f"**{t('Source')}:** {chosen['url']}")
+            st.markdown("---")
+            st.markdown(chosen["summary"])
 
 # ==================== ABOUT ====================
 elif page == nav_labels["About"]:
@@ -370,11 +377,11 @@ elif page == nav_labels["About"]:
     ))
     st.markdown("## " + t("Key Features"))
     st.markdown(t(
-        "- **Verification Scans:** Submit emails/links; get 'real or fake' verdicts.\n"
+        "- **Verification Scans:** Submit emails/links/news; get 'real or fake' verdicts.\n"
         "- **Virus Detection:** Check links/platforms for malware.\n"
         "- **News Summarizer:** Paste a link and get a professional TL;DR.\n"
-        "- **History:** Signed-in users automatically save and revisit past summaries.\n"
-        "- **Daily Courses:** Tips and quizzes to build skills.\n"
+        "- **History:** Signed-in users can revisit saved summaries.\n"
+        "- **Daily Courses:** Engaging lessons/quizzes to teach spotting fakes/viruses.\n"
         "- **Freemium Model:** Free basics, premium for unlimited."
     ))
     st.markdown("## " + t("Contact Us"))
