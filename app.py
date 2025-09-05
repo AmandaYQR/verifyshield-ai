@@ -12,6 +12,7 @@ GC_KEY      = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
 STRIPE_KEY  = st.secrets.get("STRIPE_SECRET_KEY", "")
 NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # reserved for future use
 FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")# ✅ IMPORTANT: keep this on its own line (do NOT chain with a return)
+FIREBASE_DB_URL = st.secrets.get("FIREBASE_DB_URL", "")
 
 stripe.api_key = STRIPE_KEY
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
