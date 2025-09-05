@@ -11,14 +11,41 @@ VT_KEY      = st.secrets.get("VIRUSTOTAL_API_KEY", "")
 GC_KEY      = st.secrets.get("GOOGLE_FACT_CHECK_API_KEY", "")
 STRIPE_KEY  = st.secrets.get("STRIPE_SECRET_KEY", "")
 NEWSAPI_KEY = st.secrets.get("NEWSAPI_KEY", "")  # reserved for future use
+FIREBASE_API_KEY = st.secrets.get("FIREBASE_API_KEY", "")# ✅ IMPORTANT: keep this on its own line (do NOT chain with a return)
 
-# ✅ IMPORTANT: keep this on its own line (do NOT chain with a return)
 stripe.api_key = STRIPE_KEY
-
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
 
+# ==================== Firebase Email/Password Auth (REST) ====================
+def fb_signup(email: str, password: str):
+    if not FIREBASE_API_KEY:
+        return None, "Missing FIREBASE_API_KEY in Streamlit Secrets."
+    try:
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={FIREBASE_API_KEY}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        r = requests.post(url, json=payload, timeout=15).json()
+        if "error" in r:
+            return None, r["error"]["message"]
+        return r, None
+    except Exception as e:
+        return None, str(e)
 
-# ==================== Language Selector ====================
+def fb_signin(email: str, password: str):
+    if not FIREBASE_API_KEY:
+        return None, "Missing FIREBASE_API_KEY in Streamlit Secrets."
+    try:
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_API_KEY}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
+        r = requests.post(url, json=payload, timeout=15).json()
+        if "error" in r:
+            return None, r["error"]["message"]
+        return r, None
+    except Exception as e:
+        return None, str(e)
+
+# ==================== Helpers ====================
+def track_event(event_name: str) -> None:
+    ...# ==================== Language Selector ====================
 st.sidebar.markdown("🌐 **Language**")
 LANGUAGE_OPTIONS = {
     "English": "en",
@@ -124,8 +151,51 @@ page = st.sidebar.radio(
     [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["About"]],
     key="nav_top",
 )
+# ==================== Sidebar Account Box ====================
+if "user" not in st.session_state:
+    st.session_state.user = None
 
+with st.sidebar.expander("👤 Account", expanded=True):
+    if st.session_state.user:
+        st.markdown(f"**Signed in:** {st.session_state.user.get('email', '')}")
+        if st.button("Log out", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+    else:
+        tab_login, tab_signup = st.tabs(["Sign in", "Sign up"])
 
+        with tab_login:
+            li_email = st.text_input("Email", key="li_email")
+            li_pass = st.text_input("Password", type="password", key="li_pass")
+            if st.button("Sign in", key="li_btn", use_container_width=True):
+                if not li_email or not li_pass:
+                    st.warning("Please enter email and password.")
+                else:
+                    data, err = fb_signin(li_email, li_pass)
+                    if err:
+                        st.error(f"Sign in failed: {err}")
+                    else:
+                        st.session_state.user = {
+                            "email": data.get("email", li_email),
+                            "idToken": data.get("idToken", ""),
+                            "refreshToken": data.get("refreshToken", ""),
+                            "localId": data.get("localId", ""),
+                        }
+                        st.success("Signed in!")
+                        st.rerun()
+
+        with tab_signup:
+            su_email = st.text_input("Email", key="su_email")
+            su_pass = st.text_input("Password (min 6 chars)", type="password", key="su_pass")
+            if st.button("Create account", key="su_btn", use_container_width=True):
+                if not su_email or not su_pass:
+                    st.warning("Please enter email and password.")
+                else:
+                    data, err = fb_signup(su_email, su_pass)
+                    if err:
+                        st.error(f"Sign up failed: {err}")
+                    else:
+                        st.success("Account created! You can sign in now.")
 # ==================== HOME (Email/Link/Virus) ====================
 if page == nav_labels["Home"]:
     st.title(t("VerifyShield AI - Detect Real or Fake Content"))
