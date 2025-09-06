@@ -92,20 +92,7 @@ def db_list_summaries(uid: str, id_token: str, limit: int = 50):
         return items[:limit]
     except Exception:
         return []# ==================== Firebase Realtime Database (Summaries History) ====================
-import time
-from datetime import datetime
 
-def db_save_summary(uid: str, id_token: str, url: str, title: str, summary: str):
-    ...
-
-def db_list_summaries(uid: str, id_token: str, limit: int = 50):
-    ...
-    
-
-# ==================== Helpers ====================
-def track_event(event_name: str) -> None:
-    ...# ==================== Helpers ====================
-def track_event(event_name: str) -> None:
     ...# ==================== Language Selector ====================
 st.sidebar.markdown("🌐 **Language**")
 LANGUAGE_OPTIONS = {
@@ -205,11 +192,12 @@ st.sidebar.title(t("Navigation"))
 nav_labels = {
     "Home": t("Home"),
     "News Summarizer": t("News Summarizer"),
+    "History": t("History"),
     "About": t("About"),
 }
 page = st.sidebar.radio(
     t("Go to"),
-    [nav_labels["Home"], nav_labels["News Summarizer"], nav_labels["About"]],
+    [nav_labels["Home"], nav_labels["News Summarizer"],nav_labels["History"], nav_labels["About"]],
     key="nav_top",
 )
 # ==================== Sidebar Account Box ====================
@@ -346,7 +334,51 @@ elif page == nav_labels["News Summarizer"]:
                     st.success(summary)
                     st.markdown(f"**{t('Source')}:** {url_input}")
 
+                    # Save to history if user is signed in
+                    u = st.session_state.user
+                    if u and u.get("idToken") and u.get("localId"):
+                        ok, db_err = db_save_summary(
+                            uid=u["localId"],
+                            id_token=u["idToken"],
+                            url=url_input.strip(),
+                            title="Summary",          # (you can change to a parsed title if you prefer)
+                            summary=summary,
+                        )
+                        if ok:
+                            st.info(t("Saved to your history. See the History tab."))
+                        else:
+                            # Show a short error (avoid dumping raw HTML)
+                            short = (db_err or "")[:240]
+                            st.warning(t("Saved locally but cloud save failed."))
+                            if short:
+                                st.caption(short)
+                    else:
+                        st.info(t("Sign in to save this summary to your History."))
 
+# ==================== HISTORY (for signed-in users) ====================
+elif page == nav_labels["History"]:
+    st.title(t("📚 Your History"))
+    u = st.session_state.user
+    if not u:
+        st.warning(t("Please sign in (left sidebar) to view your saved summaries."))
+    else:
+        items = db_list_summaries(u.get("localId", ""), u.get("idToken", ""))
+        if not items:
+            st.info(t("No history yet. Generate a summary in the News Summarizer tab."))
+        else:
+            labels = [
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(it['ts']))} — {it['title']}"
+                for it in items
+            ]
+            choice = st.selectbox(t("Select a past summary"), options=labels, index=0)
+            idx = labels.index(choice) if choice in labels else 0
+            chosen = items[idx]
+            st.markdown(f"**{t('Title')}:** {chosen['title']}")
+            if chosen["url"]:
+                st.markdown(f"**{t('Source')}:** {chosen['url']}")
+            st.markdown("---")
+            st.markdown(chosen["summary"])
+            
 # ==================== ABOUT ====================
 elif page == nav_labels["About"]:
     st.title(t("About VerifyShield AI"))
