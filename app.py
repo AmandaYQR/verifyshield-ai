@@ -5,6 +5,22 @@ import stripe
 import random
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
+import streamlit as st
+import streamlit.components.v1 as components
+
+# ---------- Termly Privacy Policy HTML ----------
+privacy_html = """
+<!-- START TERMELY PRIVACY POLICY -->
+<style>
+[data-custom-class='body'], [data-custom-class='body'] * { background: transparent !important; }
+[data-custom-class='title'] { font-size: 26px !important; font-weight: bold !important; }
+</style>
+<div data-custom-class="body">
+  <!-- PASTE THE FULL HTML YOU COPIED FROM TERMLY HERE -->
+  <!-- e.g., <h1 data-custom-class="title">Privacy Policy</h1> ... -->
+</div>
+<!-- END TERMELY PRIVACY POLICY -->
+"""
 
 # ==================== Config / Secrets ====================
 VT_KEY      = st.secrets.get("VIRUSTOTAL_API_KEY", "")
@@ -16,6 +32,21 @@ FIREBASE_DB_URL = st.secrets.get("FIREBASE_DB_URL", "")
 
 stripe.api_key = STRIPE_KEY
 st.set_page_config(page_title="VerifyShield AI", layout="wide")
+
+# ---------- GDPR-style consent banner ----------
+def show_consent_banner():
+    if "cookie_consent" not in st.session_state:
+        with st.container():
+            st.info("We use cookies/analytics to improve VerifyShield AI. Do you consent?")
+            c1, c2 = st.columns(2)
+            if c1.button("Accept"):
+                st.session_state.cookie_consent = True
+                st.rerun()
+            if c2.button("Decline"):
+                st.session_state.cookie_consent = False
+                st.rerun()
+
+show_consent_banner()
 
 # ==================== Firebase Email/Password Auth (REST) ====================
 def fb_signup(email: str, password: str):
@@ -128,12 +159,13 @@ def t(text: str) -> str:
 # ==================== Helpers ====================
 def track_event(event_name: str) -> None:
     """Lightweight analytics file (best-effort)."""
+    if not st.session_state.get("cookie_consent"):  # respect consent
+        return
     try:
         with open("analytics.log", "a") as f:
             f.write(f"{event_name},User:{st.session_state.get('user_id','-')}\n")
     except Exception:
         pass
-
 
 def _clean_html_to_text(html: str):
     """Extract title and body text from raw HTML using BeautifulSoup."""
@@ -194,10 +226,11 @@ nav_labels = {
     "News Summarizer": t("News Summarizer"),
     "History": t("History"),
     "About": t("About"),
+    "Privacy Policy": t("Privacy Policy"),
 }
 page = st.sidebar.radio(
     t("Go to"),
-    [nav_labels["Home"], nav_labels["News Summarizer"],nav_labels["History"], nav_labels["About"]],
+    [nav_labels["Home"], nav_labels["News Summarizer"],nav_labels["History"], nav_labels["About"]nav_labels["Privacy Policy"],],
     key="nav_top",
 )
 # ==================== Sidebar Account Box ====================
@@ -398,10 +431,27 @@ elif page == nav_labels["About"]:
         "- **Freemium Model:** Free basics, premium for unlimited."
     ))
     st.markdown("## " + t("Contact Us"))
+    if st.button("Open Privacy Policy", key="btn_privacy_about"):
+        st.session_state.nav_top = nav_labels["Privacy Policy"]
+        st.rerun()
     st.write(t("Email: support@verifyshield.ai"))
     st.write(t("Follow on X: @VerifyShieldAI"))
 
-
+# ==================== PRIVACY POLICY PAGE ====================
+elif page == nav_labels["Privacy Policy"]:
+    st.title(t("Privacy Policy"))
+    components.html(privacy_html, height=1000, scrolling=True)
+    
 # ==================== Footer ====================
+st.subheader("Contact Us")
+st.write("For any questions or issues, please contact us at support@verifyshield.ai")
+
+# Jump button to the internal Privacy Policy page
+if st.button("View our Privacy Policy"):
+    st.session_state.nav_top = nav_labels["Privacy Policy"]
+    st.rerun()
+
 st.markdown("---")
 st.write(t("Share verifications on X! #VerifyShieldAI | © 2025 VerifyShield AI"))
+
+
