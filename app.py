@@ -283,7 +283,13 @@ nav_labels = {
 }
 page = st.sidebar.radio(
     t("Go to"),
-    [nav_labels["Home"], nav_labels["News Summarizer"],nav_labels["History"], nav_labels["About"]nav_labels["Privacy Policy"],],
+    [
+        nav_labels["Home"],
+        nav_labels["News Summarizer"],
+        nav_labels["History"],
+        nav_labels["About"],
+        nav_labels["Privacy Policy"],
+    ],
     key="nav_top",
 )
 # ==================== Sidebar Account Box ====================
