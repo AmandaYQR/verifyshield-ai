@@ -312,7 +312,8 @@ with st.sidebar.expander("👤 Account", expanded=True):
                 if not li_email or not li_pass:
                     st.warning("Please enter email and password.")
                 else:
-                    data, err = fb_signin(li_email, li_pass)
+                    email = normalize_email(li_email)
+                    data, err = fb_signin(email, li_pass)                    
                     if err:
                         st.error(f"Sign in failed: {err}")
                     else:
@@ -332,7 +333,8 @@ with st.sidebar.expander("👤 Account", expanded=True):
                 if not su_email or not su_pass:
                     st.warning("Please enter email and password.")
                 else:
-                    data, err = fb_signup(su_email, su_pass)
+                    email = normalize_email(su_email)
+                    data, err = fb_signup(email, su_pass)                  
                     if err:
                         st.error(f"Sign up failed: {err}")
                     else:
