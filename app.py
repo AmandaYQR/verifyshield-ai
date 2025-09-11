@@ -210,6 +210,9 @@ def t(text: str) -> str:
 
 
 # ==================== Helpers ====================
+def normalize_email(e: str) -> str:
+    return (e or "").strip().lower()
+  
 def track_event(event_name: str) -> None:
     """Lightweight analytics file (best-effort)."""
     if not st.session_state.get("cookie_consent"):  # respect consent
@@ -313,7 +316,7 @@ with st.sidebar.expander("👤 Account", expanded=True):
                     st.warning("Please enter email and password.")
                 else:
                     email = normalize_email(li_email)
-                    data, err = fb_signin(email, li_pass)                    
+                    data, err = fb_signin(email, li_pass)
                     if err:
                         st.error(f"Sign in failed: {err}")
                     else:
@@ -334,7 +337,7 @@ with st.sidebar.expander("👤 Account", expanded=True):
                     st.warning("Please enter email and password.")
                 else:
                     email = normalize_email(su_email)
-                    data, err = fb_signup(email, su_pass)                  
+                    data, err = fb_signup(email, su_pass)                    
                     if err:
                         st.error(f"Sign up failed: {err}")
                     else:
